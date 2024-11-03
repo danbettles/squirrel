@@ -1,0 +1,9 @@
+{
+    "ignoreWords": [
+        "quux",
+        "nonexistent",
+        "phpstan",
+        "subdir",
+        "unserialized"
+    ]
+}
