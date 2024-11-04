@@ -131,6 +131,11 @@ class Squirrel
         string $key,
         Closure $factory,
     ): mixed {
+        if (0 === $this->ttl) {
+            // (Caching is disabled so avoid wasting time)
+            return $factory();
+        }
+
         if (!$this->hasItem($key)) {
             if (!$this->save($key, $factory())) {
                 throw new RuntimeException("Failed to save item `{$key}`");

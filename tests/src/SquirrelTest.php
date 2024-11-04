@@ -9,7 +9,7 @@ use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 use SplFileInfo;
 
-use function passthru;
+use function exec;
 use function preg_replace;
 use function sleep;
 use function time;
@@ -39,10 +39,16 @@ class SquirrelTest extends TestCase
         return $baseFixturesDir . ('' === $subdir ? $subdir : "/{$subdir}");
     }
 
+    /** For convenience */
+    private static function createFixturesDirInfo(string $subdir = ''): SplFileInfo
+    {
+        return new SplFileInfo(self::createFixturesDir($subdir));
+    }
+
     private static function getNonexistentDirInfo(): SplFileInfo
     {
         if (!isset(self::$nonexistentDirInfo)) {
-            self::$nonexistentDirInfo = new SplFileInfo(self::createFixturesDir('doesNotExist'));
+            self::$nonexistentDirInfo = self::createFixturesDirInfo('doesNotExist');
         }
 
         return self::$nonexistentDirInfo;
@@ -52,13 +58,13 @@ class SquirrelTest extends TestCase
     {
         $fixturesDir = self::createFixturesDir();
         $command = "rm -f --verbose {$fixturesDir}/*/*.*";
-        passthru($command);
+        exec($command);
     }
 
     /** @return array<mixed[]> */
     public static function providesValidConstructorArgs(): array
     {
-        $fixturesDirInfo = new SplFileInfo(self::createFixturesDir('testIsInstantiable'));
+        $fixturesDirInfo = self::createFixturesDirInfo('testIsInstantiable');
 
         return [
             [
@@ -116,15 +122,16 @@ class SquirrelTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage("The TTL, `{$invalidTtl}`, is invalid");
 
-        $existentCacheDir = new SplFileInfo(self::createFixturesDir(__FUNCTION__));
-
-        new Squirrel($existentCacheDir, $invalidTtl);
+        new Squirrel(
+            self::createFixturesDirInfo(__FUNCTION__),
+            $invalidTtl,
+        );
     }
 
     /** @return array<mixed[]> */
-    public static function providesValidFactoryArgs(): array
+    public static function providesValidArgsForCreate(): array
     {
-        $fixturesDirInfo = new SplFileInfo(self::createFixturesDir('testCreateReturnsANewInstance'));
+        $fixturesDirInfo = self::createFixturesDirInfo('testCreateReturnsANewInstance');
 
         return [
             [
@@ -151,7 +158,7 @@ class SquirrelTest extends TestCase
     /**
      * @phpstan-param FactoryArgsArray $factoryArgs
      */
-    #[DataProvider('providesValidFactoryArgs')]
+    #[DataProvider('providesValidArgsForCreate')]
     public function testCreateReturnsANewInstance(array $factoryArgs): void
     {
         $this->assertInstanceOf(
@@ -190,9 +197,10 @@ class SquirrelTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage("The TTL, `{$invalidTtl}`, is invalid");
 
-        $existentCacheDir = new SplFileInfo(self::createFixturesDir(__FUNCTION__));
-
-        Squirrel::create($existentCacheDir, $invalidTtl);
+        Squirrel::create(
+            self::createFixturesDir(__FUNCTION__),
+            $invalidTtl,
+        );
     }
 
     public function testSquirrelCallsSaveIfTheItemDoesNotExistInThePool(): void
@@ -204,7 +212,7 @@ class SquirrelTest extends TestCase
                 'save',
                 'getItem',
             ])
-            ->disableOriginalConstructor()
+            ->setConstructorArgs([self::createFixturesDirInfo(__FUNCTION__), 42])
             ->getMock()
         ;
 
@@ -231,11 +239,11 @@ class SquirrelTest extends TestCase
 
         /** @var Squirrel $mockSquirrel */
 
-        $foo = $mockSquirrel->squirrel('foo', function (): string {
+        $cachedItem = $mockSquirrel->squirrel('foo', function (): string {
             return 'bar';
         });
 
-        $this->assertSame('bar', $foo);
+        $this->assertSame('bar', $cachedItem);
     }
 
     public function testSquirrelNeverCallsSaveIfTheItemExistsInThePool(): void
@@ -247,7 +255,7 @@ class SquirrelTest extends TestCase
                 'save',
                 'getItem',
             ])
-            ->disableOriginalConstructor()
+            ->setConstructorArgs([self::createFixturesDirInfo(__FUNCTION__), 42])
             ->getMock()
         ;
 
@@ -272,11 +280,11 @@ class SquirrelTest extends TestCase
 
         /** @var Squirrel $mockSquirrel */
 
-        $foo = $mockSquirrel->squirrel('foo', function (): void {
+        $cachedItem = $mockSquirrel->squirrel('foo', function (): void {
             // Ignored
         });
 
-        $this->assertSame('bar', $foo);
+        $this->assertSame('bar', $cachedItem);
     }
 
     public function testSquirrelDoesWhatItShould(): void
@@ -326,5 +334,45 @@ class SquirrelTest extends TestCase
         $this->assertNotSame($originalExpiresAt, $itemAfterMoreThanTwoSeconds->expiresAt);
         // To be clear:
         $this->assertGreaterThan($originalExpiresAt, $itemAfterMoreThanTwoSeconds->expiresAt);
+    }
+
+    public function testSquirrelImmediatelyInvokesTheFactoryFunctionIfCachingIsDisabled(): void
+    {
+        $mockSquirrel = $this
+            ->getMockBuilder(Squirrel::class)
+            ->onlyMethods([
+                'hasItem',
+                'save',
+                'getItem',
+            ])
+            ->setConstructorArgs([
+                self::createFixturesDirInfo(__FUNCTION__),
+                0,
+            ])
+            ->getMock()
+        ;
+
+        $mockSquirrel
+            ->expects($this->never())
+            ->method('hasItem')
+        ;
+
+        $mockSquirrel
+            ->expects($this->never())
+            ->method('save')
+        ;
+
+        $mockSquirrel
+            ->expects($this->never())
+            ->method('getItem')
+        ;
+
+        /** @var Squirrel $mockSquirrel */
+
+        $factoryReturnValue = $mockSquirrel->squirrel('foo', function (): string {
+            return 'bar';
+        });
+
+        $this->assertSame('bar', $factoryReturnValue);
     }
 }
