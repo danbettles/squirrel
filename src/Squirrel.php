@@ -7,14 +7,20 @@ use InvalidArgumentException;
 use RuntimeException;
 use SplFileInfo;
 
+use function array_key_exists;
 use function file_get_contents;
 use function file_put_contents;
+use function in_array;
 use function md5;
 use function serialize;
 use function time;
+use function uniqid;
+use function unlink;
 use function unserialize;
 
 use const false;
+use const null;
+use const true;
 
 /**
  * "Squirrel" (noun): squirrels climb trees and feed on nuts and seeds.  They also love to do caching.
@@ -33,7 +39,25 @@ use const false;
  */
 class Squirrel
 {
+    final public const int TTL_SESSION_LIFETIME = -1;
+
+    /**
+     * @var int[]
+     */
+    private const array SPECIAL_TTLS = [
+        self::TTL_SESSION_LIFETIME,
+    ];
+
     private string $byteStreamOfFalse;
+
+    private string|null $sessionId;
+
+    /**
+     * Cache-files created by the instance
+     *
+     * @var array<string,SplFileInfo>
+     */
+    private array $cacheFiles;
 
     public static function create(
         SplFileInfo|string $cacheDir,
@@ -48,28 +72,68 @@ class Squirrel
 
     /**
      * @throws InvalidArgumentException If the directory does not exist
-     * @throws InvalidArgumentException If the TTL is invalid
      */
     public function __construct(
         private SplFileInfo $cacheDirInfo,
         private int $ttl,
     ) {
-        if (!$cacheDirInfo->isDir()) {
-            throw new InvalidArgumentException("The (cache) directory, `{$cacheDirInfo}`, does not exist");
+        if (!$this->cacheDirInfo->isDir()) {
+            throw new InvalidArgumentException("The (cache) directory, `{$this->cacheDirInfo}`, does not exist");
         }
 
-        if ($ttl < 0) {
-            throw new InvalidArgumentException("The TTL, `{$ttl}`, is invalid");
-        }
+        $this->assertTtlIsValid($this->ttl);
 
         $this->byteStreamOfFalse = serialize(false);
+        $this->sessionId = self::TTL_SESSION_LIFETIME === $this->ttl ? uniqid('', true) : null;
+        $this->cacheFiles = [];
     }
 
-    private function createItemFileInfo(string $key): SplFileInfo
+    /**
+     * @throws RuntimeException If it failed to delete a cache file
+     */
+    public function __destruct()
     {
-        $itemFilePathname = "{$this->cacheDirInfo->getPathname()}/" . md5($key) . '.bs';
+        if ($this->hasSession()) {
+            foreach ($this->cacheFiles as $key => $cacheFileInfo) {
+                if (!unlink($cacheFileInfo->getPathname())) {
+                    throw new RuntimeException("Failed to delete cache-file `{$cacheFileInfo}`");
+                }
 
-        return new SplFileInfo($itemFilePathname);
+                unset($this->cacheFiles[$key]);
+            }
+        }
+    }
+
+    private function hasSession(): bool
+    {
+        return null !== $this->sessionId;
+    }
+
+    /**
+     * @throws InvalidArgumentException If the TTL is invalid
+     */
+    private function assertTtlIsValid(int $ttl): void
+    {
+        $ttlIsValid = $ttl >= 0 || in_array($ttl, self::SPECIAL_TTLS, true);
+
+        if (!$ttlIsValid) {
+            throw new InvalidArgumentException("The TTL, `{$ttl}`, is invalid");
+        }
+    }
+
+    private function getItemFileInfo(string $key): SplFileInfo
+    {
+        if ($this->hasSession()) {
+            // Make the key unique to the session: our files will not be for sharing and we don't want to nuke files
+            // belonging to other sessions, either
+            $key .= $this->sessionId;
+        }
+
+        if (!array_key_exists($key, $this->cacheFiles)) {
+            $this->cacheFiles[$key] = new SplFileInfo("{$this->cacheDirInfo}/" . md5($key) . '.bs');
+        }
+
+        return $this->cacheFiles[$key];
     }
 
     /**
@@ -77,9 +141,16 @@ class Squirrel
      */
     protected function hasItem(string $key): bool
     {
-        $itemFileInfo = $this->createItemFileInfo($key);
+        $itemFileInfo = $this->getItemFileInfo($key);
 
-        return $itemFileInfo->isFile()
+        $itemFileExists = $itemFileInfo->isFile();
+
+        if ($this->hasSession()) {
+            // (No need to check the m-time: if the item-file exists, we can use it for as long as the 'session' is alive)
+            return $itemFileExists;
+        }
+
+        return $itemFileExists
             && ($itemFileInfo->getMTime() + $this->ttl >= time())
         ;
     }
@@ -92,7 +163,7 @@ class Squirrel
         mixed $item,
     ): bool {
         return (bool) file_put_contents(
-            $this->createItemFileInfo($key)->getPathname(),
+            $this->getItemFileInfo($key)->getPathname(),
             serialize($item),
         );
     }
@@ -104,7 +175,7 @@ class Squirrel
      */
     protected function getItem(string $key): mixed
     {
-        $itemFilePathname = $this->createItemFileInfo($key)->getPathname();
+        $itemFilePathname = $this->getItemFileInfo($key)->getPathname();
         $byteStream = file_get_contents($itemFilePathname);
 
         if (false === $byteStream) {
@@ -123,7 +194,7 @@ class Squirrel
     /**
      * "Squirrel" (verb): to store up for future use
      *
-     * Depending on the time of year (TTL), this squirrel will either return the cached item or save it
+     * Depending on the time of year (TTL), this type of squirrel will either return the cached item or save it
      *
      * @throws RuntimeException If it failed to save the item
      */
@@ -131,8 +202,8 @@ class Squirrel
         string $key,
         Closure $factory,
     ): mixed {
+        // If caching is disabled we should waste as little time as possible
         if (0 === $this->ttl) {
-            // (Caching is disabled so avoid wasting time)
             return $factory();
         }
 

@@ -9,8 +9,10 @@ use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 use SplFileInfo;
 
+use function array_filter;
 use function exec;
 use function preg_replace;
+use function scandir;
 use function sleep;
 use function time;
 
@@ -25,7 +27,9 @@ use const true;
  */
 class SquirrelTest extends TestCase
 {
-    /** For convenience */
+    /**
+     * For convenience
+     */
     private static SplFileInfo $nonexistentDirInfo;
 
     private static function createFixturesDir(string $subdir = ''): string
@@ -39,7 +43,9 @@ class SquirrelTest extends TestCase
         return $baseFixturesDir . ('' === $subdir ? $subdir : "/{$subdir}");
     }
 
-    /** For convenience */
+    /**
+     * For convenience
+     */
     private static function createFixturesDirInfo(string $subdir = ''): SplFileInfo
     {
         return new SplFileInfo(self::createFixturesDir($subdir));
@@ -52,6 +58,20 @@ class SquirrelTest extends TestCase
         }
 
         return self::$nonexistentDirInfo;
+    }
+
+    /**
+     * @return string[]
+     */
+    private static function listSignificantFiles(string $dirPathname): array
+    {
+        /** @var string[] Because I'm lazy */
+        $basenames = scandir($dirPathname);
+
+        return array_filter(
+            $basenames,
+            fn (string $basename): bool => '.' !== $basename[0],
+        );
     }
 
     protected function setUp(): void
@@ -73,12 +93,13 @@ class SquirrelTest extends TestCase
             [
                 [$fixturesDirInfo, 60],
             ],
+            [
+                [$fixturesDirInfo, Squirrel::TTL_SESSION_LIFETIME],
+            ],
         ];
     }
 
-    /**
-     * @phpstan-param ConstructorArgsArray $validConstructorArgs
-     */
+    /** @phpstan-param ConstructorArgsArray $validConstructorArgs */
     #[DataProvider('providesValidConstructorArgs')]
     public function testIsInstantiable(array $validConstructorArgs): void
     {
@@ -111,7 +132,10 @@ class SquirrelTest extends TestCase
     {
         return [
             [
-                -1,
+                -2,
+            ],
+            [
+                -3,
             ],
         ];
     }
@@ -152,12 +176,16 @@ class SquirrelTest extends TestCase
             [
                 [$fixturesDirInfo, 60],
             ],
+            [
+                [$fixturesDirInfo->getPathname(), Squirrel::TTL_SESSION_LIFETIME],
+            ],
+            [
+                [$fixturesDirInfo, Squirrel::TTL_SESSION_LIFETIME],
+            ],
         ];
     }
 
-    /**
-     * @phpstan-param FactoryArgsArray $factoryArgs
-     */
+    /** @phpstan-param FactoryArgsArray $factoryArgs */
     #[DataProvider('providesValidArgsForCreate')]
     public function testCreateReturnsANewInstance(array $factoryArgs): void
     {
@@ -314,7 +342,6 @@ class SquirrelTest extends TestCase
         $this->assertIsInt($originalExpiresAt);
 
         sleep(1);
-
         /** @phpstan-var TestItemObject */
         $itemAfterMoreThanASecond = $squirrel->squirrel($key, $factory);
 
@@ -324,7 +351,6 @@ class SquirrelTest extends TestCase
         $this->assertSame($originalExpiresAt, $itemAfterMoreThanASecond->expiresAt);
 
         sleep(2);
-
         /** @phpstan-var TestItemObject */
         $itemAfterMoreThanTwoSeconds = $squirrel->squirrel($key, $factory);
 
@@ -374,5 +400,40 @@ class SquirrelTest extends TestCase
         });
 
         $this->assertSame('bar', $factoryReturnValue);
+    }
+
+    public function testSquirrelCleansUpAfterItselfIfTheTtlIsSession(): void
+    {
+        $fixturesDir = self::createFixturesDir(__FUNCTION__);
+
+        $this->assertEmpty(self::listSignificantFiles($fixturesDir));
+
+        $key = 'Time when factory-function was invoked';
+        $factory = time(...);
+
+        $squirrel = Squirrel::create(
+            $fixturesDir,
+            ttl: Squirrel::TTL_SESSION_LIFETIME,
+        );
+
+        $originalItem = $squirrel->squirrel($key, $factory);
+
+        $this->assertIsInt($originalItem);
+
+        sleep(1);
+        $itemAfterMoreThanASecond = $squirrel->squirrel($key, $factory);
+
+        $this->assertSame($originalItem, $itemAfterMoreThanASecond);
+        $this->assertCount(1, self::listSignificantFiles($fixturesDir));
+
+        sleep(2);
+        $itemAfterMoreThanTwoSeconds = $squirrel->squirrel($key, $factory);
+
+        $this->assertSame($originalItem, $itemAfterMoreThanTwoSeconds);
+        $this->assertCount(1, self::listSignificantFiles($fixturesDir));
+
+        $squirrel->__destruct();
+
+        $this->assertEmpty(self::listSignificantFiles($fixturesDir));
     }
 }
