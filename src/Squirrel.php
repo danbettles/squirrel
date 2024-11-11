@@ -88,17 +88,11 @@ class Squirrel
         $this->cacheFiles = [];
     }
 
-    /**
-     * @throws RuntimeException If it failed to delete a cache file
-     */
     public function __destruct()
     {
         if ($this->hasSession()) {
             foreach ($this->cacheFiles as $key => $cacheFileInfo) {
-                if (!unlink($cacheFileInfo->getPathname())) {
-                    throw new RuntimeException("Failed to delete cache-file `{$cacheFileInfo}`");
-                }
-
+                @unlink($cacheFileInfo->getPathname());
                 unset($this->cacheFiles[$key]);
             }
         }

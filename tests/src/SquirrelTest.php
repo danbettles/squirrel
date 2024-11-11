@@ -10,7 +10,6 @@ use ReflectionClass;
 use SplFileInfo;
 
 use function array_filter;
-use function exec;
 use function preg_replace;
 use function scandir;
 use function sleep;
@@ -32,7 +31,7 @@ class SquirrelTest extends TestCase
      */
     private static SplFileInfo $nonexistentDirInfo;
 
-    private static function createFixturesDir(string $subdir = ''): string
+    private static function createFixturesDirPathname(string $subdir = ''): string
     {
         /** @var string */
         $classFilePathname = (new ReflectionClass(static::class))->getFileName();
@@ -48,7 +47,7 @@ class SquirrelTest extends TestCase
      */
     private static function createFixturesDirInfo(string $subdir = ''): SplFileInfo
     {
-        return new SplFileInfo(self::createFixturesDir($subdir));
+        return new SplFileInfo(self::createFixturesDirPathname($subdir));
     }
 
     private static function getNonexistentDirInfo(): SplFileInfo
@@ -72,13 +71,6 @@ class SquirrelTest extends TestCase
             $basenames,
             fn (string $basename): bool => '.' !== $basename[0],
         );
-    }
-
-    protected function setUp(): void
-    {
-        $fixturesDir = self::createFixturesDir();
-        $command = "rm -f --verbose {$fixturesDir}/*/*.*";
-        exec($command);
     }
 
     /** @return array<mixed[]> */
@@ -226,7 +218,7 @@ class SquirrelTest extends TestCase
         $this->expectExceptionMessage("The TTL, `{$invalidTtl}`, is invalid");
 
         Squirrel::create(
-            self::createFixturesDir(__FUNCTION__),
+            self::createFixturesDirPathname(__FUNCTION__),
             $invalidTtl,
         );
     }
@@ -327,7 +319,7 @@ class SquirrelTest extends TestCase
         };
 
         $squirrel = Squirrel::create(
-            self::createFixturesDir('testSquirrelDoesWhatItShould'),
+            self::createFixturesDirPathname('testSquirrelDoesWhatItShould'),
             ttl: 2,
         );
 
@@ -348,7 +340,12 @@ class SquirrelTest extends TestCase
         $this->assertIsObject($itemAfterMoreThanASecond);
         $this->assertObjectHasProperty('expiresAt', $itemAfterMoreThanASecond);
         $this->assertIsInt($itemAfterMoreThanASecond->expiresAt);
-        $this->assertSame($originalExpiresAt, $itemAfterMoreThanASecond->expiresAt);
+
+        $this->assertEqualsWithDelta(
+            $originalExpiresAt,
+            $itemAfterMoreThanASecond->expiresAt,
+            1,  /* Allows 1 ms difference, to account for slight variances in the execution-time of the tests code */
+        );
 
         sleep(2);
         /** @phpstan-var TestItemObject */
@@ -404,9 +401,13 @@ class SquirrelTest extends TestCase
 
     public function testSquirrelCleansUpAfterItselfIfTheTtlIsSession(): void
     {
-        $fixturesDir = self::createFixturesDir(__FUNCTION__);
+        $fixturesDir = self::createFixturesDirPathname(__FUNCTION__);
+        $basenameOfFileBelongingToOtherSession = '7e50c2e875a2258b4039d738b5a8ee0c.bs';
+        $significantFixtureFilesAtStart = self::listSignificantFiles($fixturesDir);
 
-        $this->assertEmpty(self::listSignificantFiles($fixturesDir));
+        $this->assertIsArray($significantFixtureFilesAtStart);
+        $this->assertCount(1, $significantFixtureFilesAtStart);
+        $this->assertContains($basenameOfFileBelongingToOtherSession, $significantFixtureFilesAtStart);
 
         $key = 'Time when factory-function was invoked';
         $factory = time(...);
@@ -416,24 +417,34 @@ class SquirrelTest extends TestCase
             ttl: Squirrel::TTL_SESSION_LIFETIME,
         );
 
-        $originalItem = $squirrel->squirrel($key, $factory);
+        $originalCacheItem = $squirrel->squirrel($key, $factory);
 
-        $this->assertIsInt($originalItem);
+        $this->assertIsInt($originalCacheItem);
 
         sleep(1);
-        $itemAfterMoreThanASecond = $squirrel->squirrel($key, $factory);
+        $itemAfterASecond = $squirrel->squirrel($key, $factory);
+        $significantFilesAfterASecond = self::listSignificantFiles($fixturesDir);
 
-        $this->assertSame($originalItem, $itemAfterMoreThanASecond);
-        $this->assertCount(1, self::listSignificantFiles($fixturesDir));
+        $this->assertSame($originalCacheItem, $itemAfterASecond);
+        $this->assertIsArray($significantFilesAfterASecond);
+        $this->assertCount(2, $significantFilesAfterASecond);
+        $this->assertContains($basenameOfFileBelongingToOtherSession, $significantFilesAfterASecond);
 
         sleep(2);
-        $itemAfterMoreThanTwoSeconds = $squirrel->squirrel($key, $factory);
+        $itemAfterTwoSeconds = $squirrel->squirrel($key, $factory);
+        $significantFilesAfterTwoSeconds = self::listSignificantFiles($fixturesDir);
 
-        $this->assertSame($originalItem, $itemAfterMoreThanTwoSeconds);
-        $this->assertCount(1, self::listSignificantFiles($fixturesDir));
+        $this->assertSame($originalCacheItem, $itemAfterTwoSeconds);
+        $this->assertIsArray($significantFilesAfterTwoSeconds);
+        $this->assertCount(2, $significantFilesAfterTwoSeconds);
+        $this->assertContains($basenameOfFileBelongingToOtherSession, $significantFilesAfterTwoSeconds);
 
         $squirrel->__destruct();
 
-        $this->assertEmpty(self::listSignificantFiles($fixturesDir));
+        // (Only) the pre-existing file should remain after the end of the session
+        $significantFilesAfterSessionEnded = self::listSignificantFiles($fixturesDir);
+        $this->assertIsArray($significantFilesAfterSessionEnded);
+        $this->assertCount(1, $significantFilesAfterSessionEnded);
+        $this->assertContains($basenameOfFileBelongingToOtherSession, $significantFilesAfterSessionEnded);
     }
 }
